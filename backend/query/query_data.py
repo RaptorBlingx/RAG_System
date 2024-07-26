@@ -1,47 +1,46 @@
-import argparse
-from langchain.vectorstores.chroma import Chroma
-from langchain.prompts import ChatPromptTemplate
-from langchain_community.llms.ollama import Ollama
-from backend.embedding.get_embedding_function import get_embedding_function
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from backend.faiss_index_handler import FAISSIndexHandler
 
-CHROMA_PATH = "chroma"
+index_handler = FAISSIndexHandler.get_instance()
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
+model = AutoModelForCausalLM.from_pretrained("distilgpt2")
 
-PROMPT_TEMPLATE = """
-Answer the question based only on the following context:
+documents = []
 
-{context}
+def add_to_index(docs):
+    global documents
+    documents.extend(docs)
+    print(f"Documents added to FAISS index: {docs}")
+    embeddings = embedding_model.encode(docs, convert_to_tensor=False)
+    print(f"Generated embeddings: {embeddings}")
+    index_handler.add_embeddings(embeddings)
+    return embeddings
 
----
+def query_rag(query_text):
+    query_embedding = embedding_model.encode([query_text], convert_to_tensor=False)
+    print(f"Query embedding: {query_embedding}")
+    D, I = index_handler.index.search(query_embedding, k=5)
+    
+    print(f"FAISS Search Results: D={D}, I={I}")
 
-Answer the question based on the above context: {question}
-"""
-
-def query_rag(query_text: str):
-    embedding_function = get_embedding_function()
-    print(f"Embedding function instance: {embedding_function}")  # Logging
-    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
-    results = db.similarity_search_with_score(query_text, k=5)
-    print(f"Query results: {results}")  # Logging
-
-    if not results:
+    # Introduce a distance threshold
+    threshold = 1.0
+    valid_indices = [i for i, dist in zip(I[0], D[0]) if dist < threshold and i >= 0 and i < len(documents)]
+    if not valid_indices:
         return "No relevant documents found.", []
 
-    context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
-    prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
-    prompt = prompt_template.format(context=context_text, question=query_text)
-    model = Ollama(model="llama3:latest")
-    try:
-        response_text = model.invoke(prompt)
-    except Exception as e:
-        response_text = f"Error invoking Ollama model: {e}"
-    sources = [doc.metadata.get("id", None) for doc, _score in results]
+    top_k_docs = [documents[i].page_content for i in valid_indices]
+    
+    print(f"Top-k Documents: {top_k_docs}")
 
-    print(f"Final response: {response_text}")  # Logging
-    return f"Response: {response_text}\nSources: {sources}"
+    if not top_k_docs:
+        return "No relevant documents found.", []
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("query_text", type=str, help="The query text.")
-    args = parser.parse_args()
-    response = query_rag(args.query_text)
-    print(response)
+    input_text = " ".join(top_k_docs) + " " + query_text
+    inputs = tokenizer.encode(input_text, return_tensors="pt")
+    outputs = model.generate(inputs, max_length=150, num_return_sequences=1)
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    return response, top_k_docs

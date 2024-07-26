@@ -1,17 +1,22 @@
 import sys
 import os
+
+# Add the project root directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 import argparse
 import shutil
+import time
+from sentence_transformers import SentenceTransformer
 from langchain_community.document_loaders.pdf import PyPDFDirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from backend.embedding.get_embedding_function import get_embedding_function
-from langchain_chroma import Chroma
+from backend.faiss_index_handler import FAISSIndexHandler
 
 CHROMA_PATH = "chroma"
 DATA_PATH = "data"
+
+index_handler = FAISSIndexHandler.get_instance()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -21,13 +26,22 @@ def main():
         clear_database()
 
     documents = load_documents()
+    if not documents:
+        print("No documents loaded. Please ensure there are PDF files in the data directory.")
+        return
+
     chunks = split_documents(documents)
-    add_to_chroma(chunks)
+    if not chunks:
+        print("No document chunks created. Please check the document splitting process.")
+        return
+
+    add_documents_to_index(chunks)
+    index_handler.save_index()
 
 def load_documents():
     document_loader = PyPDFDirectoryLoader(DATA_PATH)
     documents = document_loader.load()
-    print(f"Loaded documents: {documents}")  # Logging
+    print(f"Loaded documents: {documents}")
     return documents
 
 def split_documents(documents: list[Document]):
@@ -37,57 +51,34 @@ def split_documents(documents: list[Document]):
         length_function=len,
     )
     chunks = text_splitter.split_documents(documents)
-    print(f"Split documents into chunks: {chunks}")  # Logging
+    print(f"Split documents into chunks: {chunks}")
     return chunks
 
-def add_to_chroma(chunks: list[Document]):
-    embedding_function = get_embedding_function()
-    print(f"Embedding function instance: {embedding_function}")  # Logging
-    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
-    chunks_with_ids = calculate_chunk_ids(chunks)
-    print(f"Chunks with IDs: {chunks_with_ids}")  # Logging
+def add_documents_to_index(chunks: list[Document]):
+    document_texts = [chunk.page_content for chunk in chunks]
+    if not document_texts:
+        print("No document texts to add to index.")
+        return
 
-    existing_items = db.get(include=[])
-    print(f"Existing items in DB: {existing_items}")  # Logging
-    existing_ids = set(existing_items["ids"])
-    new_chunks = [chunk for chunk in chunks_with_ids if chunk.metadata["id"] not in existing_ids]
-    print(f"New chunks to add: {new_chunks}")  # Logging
-
-    if new_chunks:
-        batch_size = 10  # Adjust the batch size as needed
-        for i in range(0, len(new_chunks), batch_size):
-            batch = new_chunks[i:i+batch_size]
-            print(f"Adding batch {i//batch_size + 1} to Chroma")  # Debugging line
-            try:
-                print(f"Batch embeddings: {embedding_function.embed_documents([chunk.page_content for chunk in batch])}")  # Log embeddings
-                db.add_documents(batch, ids=[chunk.metadata["id"] for chunk in batch])  # Add batch of chunks
-            except Exception as e:
-                print(f"Error adding documents to Chroma: {e}")
-
-def calculate_chunk_ids(chunks):
-    last_page_id = None
-    current_chunk_index = 0
-
-    for chunk in chunks:
-        source = chunk.metadata.get("source")
-        page = chunk.metadata.get("page")
-        current_page_id = f"{source}:{page}"
-
-        if current_page_id == last_page_id:
-            current_chunk_index += 1
-        else:
-            current_chunk_index = 0
-
-        chunk_id = f"{current_page_id}:{current_chunk_index}"
-        last_page_id = current_page_id
-        chunk.metadata["id"] = chunk_id
-
-    print(f"Calculated chunk IDs: {chunks}")  # Logging
-    return chunks
+    print(f"Document texts to be indexed: {document_texts}")
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    embeddings = embedding_model.encode(document_texts, convert_to_tensor=False)
+    print(f"Generated embeddings: {embeddings}")
+    index_handler.add_embeddings(embeddings)
+    print(f"Added documents to index: {embeddings}")
 
 def clear_database():
     if os.path.exists(CHROMA_PATH):
-        shutil.rmtree(CHROMA_PATH)
+        print(f"Clearing database at path: {CHROMA_PATH}")
+        for _ in range(5):
+            try:
+                shutil.rmtree(CHROMA_PATH)
+                break
+            except PermissionError as e:
+                print(f"PermissionError: {e}. Retrying...")
+                time.sleep(1)
+        else:
+            print(f"Failed to clear database at path: {CHROMA_PATH}")
 
 if __name__ == "__main__":
     main()
