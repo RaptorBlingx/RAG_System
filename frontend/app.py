@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 
 # Add the root directory of the project to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -45,11 +46,6 @@ def process_query(query):
     with open('chunks.pkl', 'rb') as f:
         chunks = pickle.load(f)
     
-    # Debugging: print lengths and indices
-    print(f"Number of chunks: {len(chunks)}")
-    print(f"FAISS indices: {I}")
-    print(f"FAISS distances: {D}")
-    
     # Ensure indices are within range
     faiss_results = [{'content': chunks[i].page_content, 'score': D[0][idx]} for idx, i in enumerate(I[0]) if i < len(chunks)]
     
@@ -70,14 +66,21 @@ def main():
     
     query = st.text_input("Enter your query:")
     if st.button("Submit"):
+        start_time = time.time()
         with st.spinner('Processing...'):
             results = process_query(query)
             st.success('Query processed successfully!')
-            display_results(results)
             
             response = generate_response(query, results)
             st.write("Generated Response:")
             st.write(response)
+        
+        end_time = time.time()
+        response_time = end_time - start_time
+        st.write(f"Response time: {response_time:.2f} seconds")
+
+        if st.checkbox("Show raw results"):
+            display_results(results)
 
 if __name__ == "__main__":
     main()
